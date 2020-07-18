@@ -54,7 +54,7 @@ mod tests{
             unimplemented!()
         }
 
-        fn drop(&mut self, _str: String) {
+        fn done(&mut self, _str: String) {
             unimplemented!()
         }
 

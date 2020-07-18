@@ -531,7 +531,7 @@ mod tests{
         fn write(&mut self, str: String) { println!("{}",str) }
         fn close(&mut self) { unimplemented!() }
         fn set_index_ref(&mut self, _: Variable, _: Variable) { unimplemented!() }
-        fn drop(&mut self, _: std::string::String) { unimplemented!() }
+        fn done(&mut self, _: std::string::String) { unimplemented!() }
 
         fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {
             unimplemented!()

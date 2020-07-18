@@ -85,7 +85,7 @@ mod tests{
         fn write(&mut self, str: String) { println!("{}", str) }
         fn close(&mut self) {}
         fn set_index_ref(&mut self, _: Variable, _: Variable) {}
-        fn drop(&mut self, _: String) {}
+        fn done(&mut self, _: String) {}
 
         fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {}
 

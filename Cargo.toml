@@ -5,6 +5,7 @@ codegen-units = 4
 members = [
     "corr",
     "corrs",
+    "corrs_async",
     "lib/corr_server_lib",
     "lib/corr_client_lib",
     "lib/corr_core",
@@ -13,5 +14,5 @@ members = [
     "lib/corr_websocket",
     "lib/corr_rest",
     "lib/corr_postgres",
-    "lib/corr_journeys_builder"
+    "lib/corr_journeys_builder",
 ]

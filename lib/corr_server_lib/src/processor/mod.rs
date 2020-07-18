@@ -120,7 +120,7 @@ impl<T> ValueProvider for SocketClient<T> where T:IO{
     fn set_index_ref(&mut self, _: Variable, _: Variable) { 
 
     }
-    fn drop(&mut self, _: String) { 
+    fn done(&mut self, _: String) {
 
     }
 

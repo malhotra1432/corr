@@ -1,3 +1,5 @@
+#![feature(async_await)]
+use async_trait::async_trait;
 use crate::io::StringIO;
 use serde::{Serialize, Deserialize, Serializer};
 use std::collections::HashMap;
@@ -9,6 +11,10 @@ use crate::break_on;
 use std::any::Any;
 use std::error::Error;
 use std::fmt;
+use std::sync::{Arc};
+use async_mutex::Mutex;
+use tokio::sync::{RwLock};
+use futures::AsyncWriteExt;
 
 pub struct Messanger<T> where T:StringIO{
     pub string_io:Box<T>
@@ -294,28 +300,28 @@ impl RawVariableValue{
         }
     }
 }
-
+#[async_trait]
 pub trait ValueProvider{
-    fn save(&self,var:Variable,value:Value);
-    fn read(&mut self,variable:Variable)->Value;
+    async fn save(&self,var:Variable,value:Value);
+    async fn read(&mut self,variable:Variable)->Value;
 
     //    fn iterate<F>(&mut self,refering_as:Variable,to_list:Variable,inner:F) where F:Fn();
-    fn write(&mut self,text:String);
-    fn set_index_ref(&mut self,index_ref_var:Variable,list_ref_var:Variable);
-    fn drop(&mut self,str:String);
-    fn load_ith_as(&mut self,i:usize,index_ref_var:Variable,list_ref_var:Variable);
-    fn load_value_as(&mut self,ref_var: Variable, val:Value);
-    fn close(&mut self);
+    async fn write(&mut self,text:String);
+    async fn set_index_ref(&mut self,index_ref_var:Variable,list_ref_var:Variable);
+    async fn done(&mut self, str:String);
+    async fn load_ith_as(&mut self,i:usize,index_ref_var:Variable,list_ref_var:Variable);
+    async fn load_value_as(&mut self,ref_var: Variable, val:Value);
+    async fn close(&mut self);
 }
 pub struct Environment {
-    pub channel:Rc<RefCell<RCValueProvider>>
+    pub channel:Arc<Mutex<RCValueProvider>>
 }
 impl Environment {
     pub fn new_rc<T: 'static>(provider:T)->Environment where T:ValueProvider{
         Environment{
-            channel:Rc::new(RefCell::new(RCValueProvider{
+            channel:Arc::new(Mutex::new(RCValueProvider{
                 indexes:HashMap::new(),
-                reference_store:Rc::new(RefCell::new(HashMap::new())),
+                reference_store:Arc::new(RwLock::new(HashMap::new())),
                 value_store:vec![],
                 fallback_provider:Box::new(provider)
             }))
@@ -323,67 +329,67 @@ impl Environment {
     }
 }
 impl Environment {
-    pub fn error(&self, text: String) {
-        (*self.channel).borrow_mut().write(text);
-        (*self.channel).borrow_mut().close();
+    pub async fn error(&self, text: String) {
+        self.channel.lock().await.write(text);
+        self.channel.lock().await.close();
     }
-    pub fn save(&self,var:Variable,val:Value){
-        (*self.channel).borrow_mut().save(var,val);
+    pub async fn save(&self,var:Variable,val:Value){
+        self.channel.lock().await.save(var,val);
     }
-    pub fn iterate<F>(&self, refering_as: Variable, to_list: Variable, inner: F) where F: Fn(usize) {
-        let length = (*self.channel).borrow_mut().read(Variable{
+    pub async fn iterate<F>(&self, refering_as: Variable, to_list: Variable, inner: F) where F: Fn(usize) {
+        let length = self.channel.lock().await.read(Variable{
             name:format!("{}.size",to_list.name),
             data_type:Option::Some(VarType::Long)
-        });
-        (*self.channel).borrow_mut().set_index_ref(refering_as.clone() ,to_list.clone());
+        }).await;
+        self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone());
         match length {
             Value::Long(l)=>{
                 let size = l as usize;
 
                 for i in 0..size {
-                    (*self.channel).borrow_mut().load_ith_as(i,refering_as.clone() ,to_list.clone());
+                    self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone());
                     inner(i);
-                    (*self.channel).borrow_mut().drop(refering_as.name.clone());
+                    // self.channel.lock().unwrap().drop(refering_as.name.clone());
                 }
             },
             _=>{}
         }
 
     }
-    pub fn iterate_outside_building_inside<F>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F) where F: Fn(usize) {
+    pub async fn iterate_outside_building_inside<F>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F) where F: Fn(usize) {
 
-        (*self.channel).borrow_mut().set_index_ref(refering_as.clone() ,to_list.clone());
-        (*self.channel).borrow_mut().create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
+        self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone());
+        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
         for i in 0..size {
-            (*self.channel).borrow_mut().load_ith_as(i,refering_as.clone() ,to_list.clone());
+            self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone());
             inner(i);
-            (*self.channel).borrow_mut().drop(refering_as.name.clone());
+            self.channel.lock().await.done(refering_as.name.clone());
         }
     }
-    pub fn build_iterate_outside_building_inside<F,G>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F)->Vec<G> where F: Fn(usize)->G{
+    pub async fn build_iterate_outside_building_inside<F,G>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F)->Vec<G> where F: Fn(usize)->G{
         let mut res=Vec::new();
-        (*self.channel).borrow_mut().set_index_ref(refering_as.clone() ,to_list.clone());
-        (*self.channel).borrow_mut().create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
+        self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone());
+        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
         for i in 0..size {
-            (*self.channel).borrow_mut().load_ith_as(i,refering_as.clone() ,to_list.clone());
+            self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone());
             res.push(inner(i));
-            (*self.channel).borrow_mut().drop(refering_as.name.clone());
+            self.channel.lock().await.done(refering_as.name.clone());
         }
         return res;
     }
-    pub fn build_iterate<F,G>(&self, refering_as: Variable, to_list: Variable,mut push_to:Vec<G>, inner: F)->Vec<G> where F: Fn(usize)->G{
-        let length = (*self.channel).borrow_mut().read(Variable{
+    pub async fn build_iterate<F,G>(&self, refering_as: Variable, to_list: Variable,mut push_to:Vec<G>, inner: F)->Vec<G> where F: Fn(usize)->G{
+        let length = self.channel.lock().await.read(Variable{
             name:format!("{}.size",to_list.name),
             data_type:Option::Some(VarType::Long)
-        });
-        (*self.channel).borrow_mut().set_index_ref(refering_as.clone() ,to_list.clone());
+        }).await;
+        self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone()).await;
         match length {
             Value::Long(l)=>{
                 let size = l as usize;
                 for i in 0..size {
-                    (*self.channel).borrow_mut().load_ith_as(i,refering_as.clone() ,to_list.clone());
+                    self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone()).await;
                     push_to.push(inner(i));
-                    (*self.channel).borrow_mut().drop(refering_as.name.clone());
+                    self.channel.lock().await.done(refering_as.name.clone()).await;
                 }
                 return push_to;
             },
@@ -392,37 +398,36 @@ impl Environment {
 
     }
 }
-
+#[async_trait]
 impl ValueProvider for Environment{
-
-    fn read(&mut self, variable: Variable) -> Value {
-        (*self.channel).borrow_mut().read(variable)
+    async fn read(&mut self, variable: Variable) -> Value {
+        self.channel.lock().await.read(variable).await
     }
 
-    fn write(&mut self, text: String) {
-        (*self.channel).borrow_mut().write(text);
+    async fn write(&mut self, text: String) {
+        self.channel.lock().await.write(text).await;
     }
 
-    fn close(&mut self) {
-        (*self.channel).borrow_mut().close();
+    async fn close(&mut self) {
+        self.channel.lock().await.close().await
     }
-    fn drop(&mut self, str_val: String) { 
-        (*self.channel).borrow_mut().drop(str_val);
+    async fn done(&mut self, str_val: String) {
+        self.channel.lock().await.done(str_val).await;
     }
-    fn set_index_ref(&mut self, as_var: Variable, in_var: Variable) { 
-        (*self.channel).borrow_mut().set_index_ref(as_var,in_var);
-    }
-
-    fn load_ith_as(&mut self, i: usize, index_ref_var: Variable, list_ref_var: Variable) {
-        (*self.channel).borrow_mut().load_ith_as(i,index_ref_var,list_ref_var);
+    async fn set_index_ref(&mut self, as_var: Variable, in_var: Variable) {
+        self.channel.lock().await.set_index_ref(as_var,in_var).await;
     }
 
-    fn save(&self, var: Variable, value: Value) {
-        (*self.channel).borrow_mut().save(var,value);
+    async fn load_ith_as(&mut self, i: usize, index_ref_var: Variable, list_ref_var: Variable) {
+        self.channel.lock().await.load_ith_as(i,index_ref_var,list_ref_var).await;
     }
 
-    fn load_value_as(&mut self, ref_var: Variable, val: Value) {
-        (*self.channel).borrow_mut().load_value_as(ref_var,val);
+    async fn save(&self, var: Variable, value: Value) {
+        self.channel.lock().await.save(var,value).await;
+    }
+
+    async fn load_value_as(&mut self, ref_var: Variable, val: Value) {
+        self.channel.lock().await.load_value_as(ref_var,val).await;
     }
 }
 
@@ -469,8 +474,8 @@ impl Object {
 }
 pub struct RCValueProvider{
     pub fallback_provider:Box<dyn ValueProvider>,
-    pub value_store:Vec<Rc<Object>>,
-    pub reference_store:Rc<RefCell<HashMap<String,Rc<Object>>>>,
+    pub value_store:Vec<Arc<Object>>,
+    pub reference_store:Arc<RwLock<HashMap<String,Rc<Object>>>>,
     pub indexes:HashMap<String,String>,
 }
 #[derive(Debug)]
@@ -578,9 +583,10 @@ impl RCValueProvider {
     }
 
 }
+#[async_trait]
 impl ValueProvider for RCValueProvider{
     
-    fn read(&mut self, var: Variable) -> Value {
+    async fn read(&mut self, var: Variable) -> Value {
         let obj = self.get_object_at_path(var.name.clone());
         match obj {
             Option::Some(rc_value)=>{
@@ -592,16 +598,16 @@ impl ValueProvider for RCValueProvider{
                     Option::Some((left,right))=>{
                         if right.clone() == "size"{
                             self.create_object_at_path(left,Rc::new(Object::new_list_object()));
-                            let val=self.fallback_provider.read(var.clone());
+                            let val=self.fallback_provider.read(var.clone()).await;
                             val
                         } else {
-                            let val=self.fallback_provider.read(var.clone());
+                            let val=self.fallback_provider.read(var.clone()).await;
                             self.create_object_at_path(var.name.clone(),Rc::new(Object::Final(val.clone())));
                             val
                         }
                     },
                     Option::None=>{
-                        let val=self.fallback_provider.read(var.clone());
+                        let val=self.fallback_provider.read(var.clone()).await;
                         self.create_object_at_path(var.name.clone(),Rc::new(Object::Final(val.clone())));
                         val
                     }
@@ -622,7 +628,7 @@ impl ValueProvider for RCValueProvider{
     fn set_index_ref(&mut self, as_ref:Variable, in_ref:Variable) {
         self.indexes.insert(as_ref.name.clone(), in_ref.name.clone());
     }
-    fn drop(&mut self, key: String) { 
+    fn done(&mut self, key: String) {
         let mut keys_to_remove=Vec::new();
         for ref_key in (*self.reference_store).borrow().keys()  {
             if ref_key.starts_with(format!("{}.",key).as_str()){
@@ -637,11 +643,11 @@ impl ValueProvider for RCValueProvider{
         temp.remove(&key);
     }
 
-    fn load_ith_as(&mut self, i: usize, index_ref_var: Variable, list_ref_var: Variable) {
+    async fn load_ith_as(&mut self, i: usize, index_ref_var: Variable, list_ref_var: Variable) {
         if let Some(val)=self.get_object_at_path(list_ref_var.name.clone()){
             match &*val {
                 Object::List(lst)=>{
-                    let mut temp=(*self.reference_store).borrow_mut();
+                    let mut temp=self.reference_store.write().await;
                     if (**lst).borrow().len()>i{
                         temp.insert(index_ref_var.name.clone(),(**lst).borrow().get(i).unwrap().clone());
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::Object{
@@ -662,7 +668,7 @@ impl ValueProvider for RCValueProvider{
             self.create_object_at_path(list_ref_var.name.clone(),lst.clone());
             match &*lst {
                 Object::List(lst)=>{
-                    let mut temp=(*self.reference_store).borrow_mut();
+                    let mut temp=self.reference_store.write().await;
                     if (**lst).borrow().len()>i{
                         temp.insert(index_ref_var.name.clone(),(**lst).borrow().get(i).unwrap().clone());
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::Object{
@@ -680,8 +686,8 @@ impl ValueProvider for RCValueProvider{
             }
         }
     }
-    fn load_value_as(&mut self,ref_var: Variable, val:Value) {
-        let mut temp=(*self.reference_store).borrow_mut();
+    async fn load_value_as(&mut self,ref_var: Variable, val:Value) {
+        let mut temp=self.reference_store.lock().await.write();
         temp.insert(ref_var.name.clone(),Rc::new(Object::Final(val)));
 
     }
@@ -747,7 +753,7 @@ mod tests {
         fn write(&mut self, str: String) { println!("{}", str) }
         fn close(&mut self) {}
         fn set_index_ref(&mut self, _: Variable, _: Variable) {}
-        fn drop(&mut self, _: String) {}
+        fn done(&mut self, _: String) {}
 
         fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {}
 
