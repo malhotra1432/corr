@@ -7,7 +7,6 @@ use corr_core::runtime::{Environment, Variable, Value};
 use postgres::{Client, NoTls};
 use corr_templates::text::parser::parse;
 use corr_templates::Fillable;
-use std::rc::Rc;
 pub struct DBStep {
     pub connection:Text,
     pub query:Text

@@ -11,7 +11,6 @@ use crate::proto::{InputParcel, Input, Output, StartInput, KnowThatOutput, TellM
 use crate::proto::Result;
 use std::ops::Generator;
 use futures::executor::block_on;
-use std::rc::Rc;
 use corr_core::runtime::{ValueProvider, Variable, Value, VariableDesciption, VarType};
 use std::time::Duration;
 

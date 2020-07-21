@@ -15,6 +15,7 @@ use corr_websocket::{Action, DesiredAction};
 use corr_core::runtime::{Variable, VarType, Value, RawVariableValue, VariableDesciption};
 use self::corr_core::runtime::{ValueProvider, Environment};
 use std::fs::File;
+use async_trait::async_trait;
 const APP_INFO: AppInfo = AppInfo{name: "corrs", author: "Atmaram Naik"};
 #[derive(Debug)]
 pub struct SocketClient<T>(T) where T:IO;
@@ -62,10 +63,9 @@ impl<T> IO for Client<T> where T:std::io::Read+std::io::Write+Splittable{
     fn close(&mut self) {
     }
 }
+#[async_trait]
 impl<T> ValueProvider for SocketClient<T> where T:IO{
-
-
-    fn read(&mut self, variable: Variable) -> Value {
+    async fn read(&mut self, variable: Variable) -> Value {
         let desired_action = DesiredAction::Tell(VariableDesciption{
            name: variable.name.clone(),
             data_type:match variable.data_type {
@@ -97,11 +97,11 @@ impl<T> ValueProvider for SocketClient<T> where T:IO{
             }
         }
     }
-    fn write(&mut self, text: String) {
+    async fn write(&mut self, text: String) {
         self.0.send(DesiredAction::Listen(text))
     }
 
-    fn close(&mut self) {
+    async fn close(&mut self) {
         self.0.send(DesiredAction::Quit);
         loop{
             let client_action=self.0.wait_for_action();
@@ -117,22 +117,22 @@ impl<T> ValueProvider for SocketClient<T> where T:IO{
         }
 
     }
-    fn set_index_ref(&mut self, _: Variable, _: Variable) { 
+    async fn set_index_ref(&mut self, _: Variable, _: Variable) {
 
     }
-    fn done(&mut self, _: String) {
+    async fn done(&mut self, _: String) {
 
     }
 
-    fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {
+    async fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {
             
     }
 
-    fn save(&self, _var: Variable, _value: Value) {
+    async fn save(&self, _var: Variable, _value: Value) {
 
     }
 
-    fn load_value_as(&mut self, _ref_var: Variable, _val: Value) {
+    async fn load_value_as(&mut self, _ref_var: Variable, _val: Value) {
 
     }
 }

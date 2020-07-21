@@ -3,6 +3,7 @@ use corr_core::runtime::{Variable, ValueProvider, Environment};
 use corr_core::runtime::Value;
 use corr_core::runtime::VarType;
 use corr_templates::text::Text;
+use async_trait::async_trait;
 
 pub struct PrintStep{
     pub text:Text
@@ -62,11 +63,13 @@ impl Executable for TimesStep {
 pub struct JourneyStore{
     pub journeys:Vec<Journey>
 }
+#[async_trait]
 pub trait Interactable{
-    fn start_with(&self,filter:String,runtime:Environment) ;
+    async fn start_with(&self,filter:String,runtime:Environment) ;
 }
+#[async_trait]
 impl Interactable for JourneyStore{
-    fn start_with(&self, _filter: String, mut runtime: Environment)  {
+    async fn start_with(&self, _filter: String, mut runtime: Environment)  {
         runtime.write(format!("Choose from following"));
         let mut counter = 1;
         for journey in &self.journeys{

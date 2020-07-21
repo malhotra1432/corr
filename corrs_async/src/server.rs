@@ -107,5 +107,5 @@ pub fn start(user:User){
     let js = JourneyStore {
         journeys
     };
-    js.start_with(format!("hello"),Environment::new_rc(user));
+    js.start_with(format!("hello"),Environment::new_rc(user)).await;
 }
