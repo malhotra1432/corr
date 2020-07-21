@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::io::StringIO;
 use serde::{Serialize, Deserialize, Serializer};
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::cell::RefCell;
 use std::fmt::{Debug, Display};
 use std::result::Result;
@@ -12,10 +11,12 @@ use std::any::Any;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc};
-use async_mutex::Mutex;
 use tokio::sync::{RwLock};
 use futures::AsyncWriteExt;
-
+use futures::lock::Mutex;
+use std::marker::Send;
+use futures::future::BoxFuture;
+use async_recursion::async_recursion;
 pub struct Messanger<T> where T:StringIO{
     pub string_io:Box<T>
 }
@@ -66,7 +67,7 @@ pub enum Value{
     Object(HashMap<String,Value>),
     Array(Vec<Value>),
     Null,
-    Reference(Rc<dyn Any>)
+    Reference(Arc<dyn Any>)
 }
 impl PartialEq for Value{
     fn eq(&self, other: &Self) -> bool {
@@ -317,13 +318,13 @@ pub struct Environment {
     pub channel:Arc<Mutex<RCValueProvider>>
 }
 impl Environment {
-    pub fn new_rc<T: 'static>(provider:T)->Environment where T:ValueProvider{
+    pub fn new_rc<T>(provider:T)->Environment where T:ValueProvider+Send {
         Environment{
             channel:Arc::new(Mutex::new(RCValueProvider{
                 indexes:HashMap::new(),
-                reference_store:Arc::new(RwLock::new(HashMap::new())),
+                reference_store:Arc::new(Mutex::new(HashMap::new())),
                 value_store:vec![],
-                fallback_provider:Box::new(provider)
+                fallback_provider:Arc::new(Mutex::new(provider))
             }))
         }
     }
@@ -359,7 +360,7 @@ impl Environment {
     pub async fn iterate_outside_building_inside<F>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F) where F: Fn(usize) {
 
         self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone());
-        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
+        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Arc::new(Mutex::new(Object::new_list_object())));
         for i in 0..size {
             self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone());
             inner(i);
@@ -369,7 +370,7 @@ impl Environment {
     pub async fn build_iterate_outside_building_inside<F,G>(&self, refering_as: Variable, to_list: Variable,size:usize, inner: F)->Vec<G> where F: Fn(usize)->G{
         let mut res=Vec::new();
         self.channel.lock().await.set_index_ref(refering_as.clone() ,to_list.clone());
-        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Rc::new(Object::new_list_object()));
+        self.channel.lock().await.create_object_at_path(to_list.name.clone(),Arc::new(Mutex::new(Object::new_list_object())));
         for i in 0..size {
             self.channel.lock().await.load_ith_as(i,refering_as.clone() ,to_list.clone());
             res.push(inner(i));
@@ -440,15 +441,15 @@ pub struct Variable{
 #[derive(Debug,Clone)]
 pub enum Object{
     Final(Value),
-    Object(Rc<RefCell<HashMap<String,Rc<Object>>>>),
-    List(Rc<RefCell<Vec<Rc<Object>>>>)
+    Object(Arc<Mutex<HashMap<String,Arc<Mutex<Object>>>>>),
+    List(Arc<Mutex<Vec<Arc<Mutex<Object>>>>>)
 }
 impl Object {
     pub fn new_list_object()->Object{
-        return Object::List(Rc::new(RefCell::new(vec![])));
+        return Object::List(Arc::new(Mutex::new(vec![])));
     }
-    pub fn new_object_object(map:HashMap<String,Rc<Object>>)->Object{
-        return Object::Object(Rc::new(RefCell::new(map)))
+    pub fn new_object_object(map:HashMap<String,Arc<Mutex<Object>>>)->Object{
+        return Object::Object(Arc::new(Mutex::new(map)))
     }
     pub fn to_value(&self)->Value{
         match self{
@@ -473,9 +474,9 @@ impl Object {
     }
 }
 pub struct RCValueProvider{
-    pub fallback_provider:Box<dyn ValueProvider>,
-    pub value_store:Vec<Arc<Object>>,
-    pub reference_store:Arc<RwLock<HashMap<String,Rc<Object>>>>,
+    pub fallback_provider:Arc<Mutex<dyn ValueProvider>>,
+    pub value_store:Vec<Arc<Mutex<Object>>>,
+    pub reference_store:Arc<Mutex<HashMap<String,Arc<Mutex<Object>>>>>,
     pub indexes:HashMap<String,String>,
 }
 #[derive(Debug)]
@@ -490,56 +491,60 @@ impl Display for JourneyError{
     }
 }
 impl RCValueProvider {
-    pub fn get_object_at_path(&self,var:String)->Option<Rc<Object>>{
-        if var.contains('.'){
-            let (left,right)=break_on(var.clone(),'.').unwrap();
-            let opt_rc=self.get_object_at_path(left);
-            match  opt_rc {
-                Option::Some(rc)=>{
-                    match &*rc {
-                        Object::Object(obj)=>{
-                            let ref_hm=(**obj).borrow_mut();
-                            let ref_rc=ref_hm.get(&right);
-                            match ref_rc {
-                                Option::Some(a_rc)=> Option::Some(a_rc.clone()),
-                                Option::None=>Option::None
-                            }
-                        },
-                        Object::List(lst)=>{
-                            if right==format!("size"){
-                                Option::Some(Rc::new(Object::Final(Value::Long((**lst).borrow_mut().len() as i64))))
-                            } else {
-                                Option::None
-                            }
-                        },
-                        _=>{Option::None}
+    #[async_recursion]
+    pub async fn get_object_at_path(&self,var:String)->Option<Arc<Mutex<Object>>>{
+            if var.contains('.'){
+                let (left,right)=break_on(var.clone(),'.').unwrap();
+                let opt_rc=self.get_object_at_path(left).await;
+                match  opt_rc {
+                    Option::Some(rc)=>{
+                        let obj=&*rc.lock().await;
+                        match obj {
+                            Object::Object(obj)=>{
+                                let ref_hm=obj.lock().await;
+                                let ref_rc=ref_hm.get(&right);
+                                match ref_rc {
+                                    Option::Some(a_rc)=> Option::Some(a_rc.clone()),
+                                    Option::None=>Option::None
+                                }
+                            },
+                            Object::List(lst)=>{
+                                if right==format!("size"){
+                                    Option::Some(Arc::new(Mutex::new(Object::Final(Value::Long(lst.lock().await.len() as i64)))))
+                                } else {
+                                    Option::None
+                                }
+                            },
+                            _=>{Option::None}
+                        }
+                    },
+                    Option::None=>{
+                        Option::None
                     }
-                },
-                Option::None=>{
-                    Option::None
                 }
+
+            } else {
+                let temp=self.reference_store.lock().await;
+                let ref_rc=temp.get(&var);
+                match ref_rc {
+                    Option::Some(a_rc)=> Option::Some(a_rc.clone()),
+                    Option::None=>Option::None
+                }
+
             }
 
-        } else {
-            let temp=(*self.reference_store).borrow();
-            let ref_rc=temp.get(&var);
-            match ref_rc {
-                Option::Some(a_rc)=> Option::Some(a_rc.clone()),
-                Option::None=>Option::None
-            }
-
-        }
 
     }
-    pub fn create_object_at_path(&self,var:String,object:Rc<Object>)->Result<(),JourneyError>{
+    #[async_recursion]
+    pub async fn create_object_at_path(&self,var:String,object:Arc<Mutex<Object>>)->Result<(),JourneyError>{
         if var.contains('.'){
             let (left,right)=break_on(var.clone(),'.').unwrap();
-            let rc=self.get_object_at_path(left.clone());
+            let rc=self.get_object_at_path(left.clone()).await;
             match rc {
                 Option::Some(rc_object)=>{
-                    match &*rc_object {
+                    match &*rc_object.lock().await {
                         Object::Object(obj)=>{
-                            (**obj).borrow_mut().insert(right,object);
+                            obj.lock().await.insert(right,object);
                             Ok(())
                         },
                         _=>{
@@ -553,18 +558,19 @@ impl RCValueProvider {
                 Option::None=>{
                     let mut map=HashMap::new();
                     map.insert(right,object);
-                    let rc_obj=Rc::new(Object::new_object_object(map));
-                    self.create_object_at_path(left,rc_obj)
+                    let rc_obj=Arc::new(Mutex::new(Object::new_object_object(map)));
+                    self.create_object_at_path(left,rc_obj).await
                 }
             }
 
         } else {
-            (*self.reference_store).borrow_mut().insert(var.clone(),Rc::clone(&object));
+            self.reference_store.lock().await.insert(var.clone(),Arc::clone(&object));
             if self.indexes.contains_key(&var.clone()){
-                let obj=self.get_object_at_path(self.indexes.get(&var.clone()).unwrap().clone()).unwrap().clone();
+                let rc=self.get_object_at_path(self.indexes.get(&var.clone()).unwrap().clone()).await.unwrap();
+                let obj = rc.lock().await;
                 match &*obj {
                     Object::List(lst)=>{
-                        (**lst).borrow_mut().push(Rc::clone(&object));
+                        lst.lock().await.push(Arc::clone(&object));
                         Ok(())
                     },
                     _=>{
@@ -587,28 +593,28 @@ impl RCValueProvider {
 impl ValueProvider for RCValueProvider{
     
     async fn read(&mut self, var: Variable) -> Value {
-        let obj = self.get_object_at_path(var.name.clone());
+        let obj = self.get_object_at_path(var.name.clone()).await;
         match obj {
             Option::Some(rc_value)=>{
-                rc_value.to_value()
+                rc_value.lock().await.to_value()
             },
             Option::None =>{
                 let opt = break_on(var.name.clone(),'.');
                 match opt {
                     Option::Some((left,right))=>{
                         if right.clone() == "size"{
-                            self.create_object_at_path(left,Rc::new(Object::new_list_object()));
-                            let val=self.fallback_provider.read(var.clone()).await;
+                            self.create_object_at_path(left,Arc::new(Mutex::new(Object::new_list_object()))).await;
+                            let val=self.fallback_provider.lock().await.read(var.clone()).await;
                             val
                         } else {
-                            let val=self.fallback_provider.read(var.clone()).await;
-                            self.create_object_at_path(var.name.clone(),Rc::new(Object::Final(val.clone())));
+                            let val=self.fallback_provider.lock().await.read(var.clone()).await;
+                            self.create_object_at_path(var.name.clone(),Arc::new(Mutex::new(Object::Final(val.clone())))).await;
                             val
                         }
                     },
                     Option::None=>{
-                        let val=self.fallback_provider.read(var.clone()).await;
-                        self.create_object_at_path(var.name.clone(),Rc::new(Object::Final(val.clone())));
+                        let val=self.fallback_provider.lock().await.read(var.clone()).await;
+                        self.create_object_at_path(var.name.clone(),Arc::new(Mutex::new(Object::Final(val.clone())))).await;
                         val
                     }
                 }
@@ -618,67 +624,69 @@ impl ValueProvider for RCValueProvider{
 
     }
     
-    fn write(&mut self, str: String) {
-         self.fallback_provider.write(str)
+    async fn write(&mut self, str: String) {
+         self.fallback_provider.lock().await.write(str).await
     }
     
-    fn close(&mut self) { 
-        self.fallback_provider.close();
+    async fn close(&mut self) {
+        self.fallback_provider.lock().await.close();
     }
-    fn set_index_ref(&mut self, as_ref:Variable, in_ref:Variable) {
+    async fn set_index_ref(&mut self, as_ref:Variable, in_ref:Variable) {
         self.indexes.insert(as_ref.name.clone(), in_ref.name.clone());
     }
-    fn done(&mut self, key: String) {
+    async fn done(&mut self, key: String) {
         let mut keys_to_remove=Vec::new();
-        for ref_key in (*self.reference_store).borrow().keys()  {
+        for ref_key in self.reference_store.lock().await.keys()  {
             if ref_key.starts_with(format!("{}.",key).as_str()){
                 keys_to_remove.push(ref_key.clone())
             }
         }
         for rm_key in keys_to_remove{
-            let mut temp=(*self.reference_store).borrow_mut();
+            let mut temp=self.reference_store.lock().await;
             temp.remove(&rm_key);
         }
-        let mut temp=(*self.reference_store).borrow_mut();
+        let mut temp=self.reference_store.lock().await;
         temp.remove(&key);
     }
 
     async fn load_ith_as(&mut self, i: usize, index_ref_var: Variable, list_ref_var: Variable) {
-        if let Some(val)=self.get_object_at_path(list_ref_var.name.clone()){
-            match &*val {
+        if let Some(val)=self.get_object_at_path(list_ref_var.name.clone()).await{
+            let obj = val.lock().await;
+            match &*obj {
                 Object::List(lst)=>{
-                    let mut temp=self.reference_store.write().await;
-                    if (**lst).borrow().len()>i{
-                        temp.insert(index_ref_var.name.clone(),(**lst).borrow().get(i).unwrap().clone());
+                    let mut temp=&mut *self.reference_store.lock().await;
+                    if lst.lock().await.len()>i{
+                        temp.insert(index_ref_var.name.clone(),lst.lock().await.get(i).unwrap().clone());
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::Object{
                         let map=HashMap::new();
-                        let obj = Rc::new(Object::new_object_object(map));
-                        (**lst).borrow_mut().push(obj.clone());
+                        let obj = Arc::new(Mutex::new(Object::new_object_object(map)));
+                        lst.lock().await.push(obj.clone());
                         temp.insert(index_ref_var.name.clone(),obj);
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::List {
-                        let objct = Rc::new(Object::new_list_object());
-                        (**lst).borrow_mut().push(objct.clone());
+                        let objct = Arc::new(Mutex::new(Object::new_list_object()));
+                        lst.lock().await.push(objct.clone());
                         temp.insert(index_ref_var.name.clone(),objct);
                     }
                 },
                 _=>{unimplemented!()}
             }
         } else {
-            let lst=Rc::new(Object::new_list_object());
+            let lst=Arc::new(Mutex::new(Object::new_list_object()));
             self.create_object_at_path(list_ref_var.name.clone(),lst.clone());
-            match &*lst {
+            let obj = lst.lock().await;
+            match  &*obj {
                 Object::List(lst)=>{
-                    let mut temp=self.reference_store.write().await;
-                    if (**lst).borrow().len()>i{
-                        temp.insert(index_ref_var.name.clone(),(**lst).borrow().get(i).unwrap().clone());
+                    let mut temp=self.reference_store.lock().await;
+                    if lst.lock().await.len()>i{
+                        temp.insert(index_ref_var.name.clone(),lst.lock().await.get(i).unwrap().clone());
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::Object{
                         let map=HashMap::new();
-                        let obj = Rc::new(Object::new_object_object(map));
-                        (**lst).borrow_mut().push(obj.clone());
+                        let obj = Arc::new(Mutex::new(Object::new_object_object(map)));
+                        lst.lock().await.push(obj.clone());
                         temp.insert(index_ref_var.name.clone(),obj);
                     } else if index_ref_var.data_type.clone().unwrap() == VarType::List {
-                        let objct = Rc::new(Object::new_list_object());
-                        (**lst).borrow_mut().push(objct.clone());
+                        let objct = Arc::new(Mutex::new(Object::new_list_object()));
+                        lst.lock().await.push(objct.clone());
                         temp.insert(index_ref_var.name.clone(),objct);
                     }
                 },
@@ -687,25 +695,26 @@ impl ValueProvider for RCValueProvider{
         }
     }
     async fn load_value_as(&mut self,ref_var: Variable, val:Value) {
-        let mut temp=self.reference_store.lock().await.write();
-        temp.insert(ref_var.name.clone(),Rc::new(Object::Final(val)));
+        let mut temp=self.reference_store.lock().await;
+        temp.insert(ref_var.name.clone(),Arc::new(Mutex::new(Object::Final(val))));
 
     }
-    fn save(&self, var: Variable, value: Value) {
-        self.create_object_at_path(var.name.clone(),Rc::new(Object::Final(value)));
+    async fn save(&self, var: Variable, value: Value) {
+        self.create_object_at_path(var.name.clone(),Arc::new(Mutex::new(Object::Final(value)))).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::{RCValueProvider};
+    use async_trait::async_trait;
+    use crate::runtime::{RCValueProvider, Object};
     use crate::runtime::Variable;
     use crate::runtime::Environment;
     use crate::runtime::{ValueProvider, VarType};
     use std::collections::HashMap;
     use crate::runtime::Value;
-    use std::rc::Rc;
     use std::cell::RefCell;
+    use std::sync::{Arc, Mutex};
 
     extern crate serde_json;
 
@@ -742,26 +751,27 @@ mod tests {
         array.push(Value::String(format!("hello")));
         assert_eq!(serde_json::to_string(&Value::Array(array)).unwrap(), format!(r#"["hello"]"#))
     }
+    #[async_trait]
 
     impl ValueProvider for MockProvider {
 
-        fn read(&mut self, _: Variable) -> Value {
+        async fn read(&mut self, _: Variable) -> Value {
             let ret = self.1[self.0].clone();
             self.0 += 1;
             ret
         }
-        fn write(&mut self, str: String) { println!("{}", str) }
-        fn close(&mut self) {}
-        fn set_index_ref(&mut self, _: Variable, _: Variable) {}
-        fn done(&mut self, _: String) {}
+        async fn write(&mut self, str: String) { println!("{}", str) }
+        async fn close(&mut self) {}
+        async fn set_index_ref(&mut self, _: Variable, _: Variable) {}
+        async fn done(&mut self, _: String) {}
 
-        fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {}
+        async fn load_ith_as(&mut self, _i: usize, _index_ref_var: Variable, _list_ref_var: Variable) {}
 
-        fn save(&self, _var: Variable, _value: Value) {
+        async fn save(&self, _var: Variable, _value: Value) {
             unimplemented!()
         }
 
-        fn load_value_as(&mut self, _ref_var: Variable, _val: Value) {
+        async fn load_value_as(&mut self, _ref_var: Variable, _val: Value) {
             unimplemented!()
         }
     }
@@ -785,7 +795,7 @@ mod tests {
                                                           Value::String(format!("Atmaram 20")),
                                                           Value::String(format!("Atmaram 21"))
         ]));
-        let mch = Rc::clone(&rt.channel);
+        let mch = Arc::clone(&rt.channel);
         rt.iterate(Variable {
             name: format!("hobby"),
             data_type: Option::Some(VarType::Object)
@@ -816,7 +826,7 @@ mod tests {
     fn should_read_same_variable_from_rc_provider_multiple_times() {
         let mut rcp = RCValueProvider {
             value_store: Vec::new(),
-            reference_store: Rc::new(RefCell::new(HashMap::new())),
+            reference_store: Arc::new(Mutex::new(HashMap::new())),
             fallback_provider: Box::new(MockProvider(0, vec![
                 Value::String(format!("Atmaram"))
             ])),
@@ -834,7 +844,7 @@ mod tests {
     fn should_size_from_rc_provider() {
         let mut rcp = RCValueProvider {
             value_store: Vec::new(),
-            reference_store: Rc::new(RefCell::new(HashMap::new())),
+            reference_store: Arc::new(Mutex::new(HashMap::new())),
             fallback_provider: Box::new(MockProvider(0, vec![
                 Value::Long(2),
                 Value::String(format!("Atmaram"))
@@ -851,10 +861,10 @@ mod tests {
     #[test]
     fn should_iterate_over_runtime_reading_values() {
         let rt = Environment {
-            channel: Rc::new(RefCell::new(
+            channel: Arc::new(Mutex::new((
                 RCValueProvider {
                     value_store: Vec::new(),
-                    reference_store: Rc::new(RefCell::new(HashMap::new())),
+                    reference_store: Arc::new(Mutex::new(HashMap::<String,Arc<Mutex<Object>>>::new())),
                     fallback_provider: Box::new(MockProvider(0, vec![
                         Value::Long(2),
                         Value::String(format!("Atmaram 0")),
@@ -862,9 +872,9 @@ mod tests {
                     ])),
                     indexes: HashMap::new()
                 }
-            ))
+            )))
         };
-        let mch = Rc::clone(&rt.channel);
+        let mch = Arc::clone(&rt.channel);
         rt.iterate(Variable {
             name: format!("hobby"),
             data_type: Option::Some(VarType::String)
